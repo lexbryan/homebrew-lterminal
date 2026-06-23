@@ -4,7 +4,7 @@ class Lterminal < Formula
   # For a tagged release, fill in the checksum:
   #   curl -L https://github.com/lexbryan/homebrew-lterminal/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
   url "https://github.com/lexbryan/homebrew-lterminal/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_TARBALL_SHA256"
+  sha256 "bd0f0488d3db8f655ee276c6ac5ace63038744d081f70cca6910d58203260487"
   license "MIT"
 
   # Install straight from main, no release required:
