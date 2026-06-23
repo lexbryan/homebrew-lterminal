@@ -1,0 +1,390 @@
+#!/usr/bin/env osascript -l JavaScript
+//
+// lterminal engine — tile and manage the Terminal.app windows visible on the
+// current macOS Space. Pure JXA (JavaScript for Automation), no dependencies.
+//
+//   • Terminal scripting dictionary  -> read/set each window's `bounds`
+//   • CGWindowListCopyWindowInfo      -> which windows are on the current Space
+//   • NSScreen.visibleFrame           -> usable area (minus menu bar + Dock)
+//
+// Commands (dispatched on argv[0]): snap | max | cycle | list | dump | apply
+//
+ObjC.import('AppKit');
+ObjC.import('CoreGraphics');
+
+// ===========================================================================
+// Geometry helpers. Terminal + CGWindow use a top-left origin, y-down, global
+// coordinate space (primary display's top-left = 0,0). NSScreen uses a
+// bottom-left origin, so each screen rect is flipped into top-left space once.
+// ===========================================================================
+
+function screensTopLeft() {
+  const screens = $.NSScreen.screens;
+  const count = screens.count;
+  const primaryH = screens.objectAtIndex(0).frame.size.height;
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const s = screens.objectAtIndex(i);
+    const f = s.frame, v = s.visibleFrame;
+    out.push({
+      index: i,
+      frame:  { x: f.origin.x, y: primaryH - (f.origin.y + f.size.height), w: f.size.width, h: f.size.height },
+      usable: { x: v.origin.x, y: primaryH - (v.origin.y + v.size.height), w: v.size.width, h: v.size.height },
+    });
+  }
+  return out;
+}
+
+// Window numbers (== Terminal AppleScript ids) for Terminal windows on the
+// CURRENT Space. onScreenOnly (1) returns only the active Space;
+// excludeDesktopElements (16) drops desktop chrome.
+function currentSpaceTerminalIds() {
+  const ref  = $.CGWindowListCopyWindowInfo(1 | 16, 0);
+  const list = ObjC.deepUnwrap(ObjC.castRefToObject(ref)) || [];
+  const ids = {};
+  for (let i = 0; i < list.length; i++) {
+    const w = list[i];
+    if (w.kCGWindowOwnerName !== 'Terminal') continue;
+    if (w.kCGWindowLayer !== 0) continue;
+    const b = w.kCGWindowBounds;
+    if (!b || b.Width < 60 || b.Height < 60) continue;
+    ids[w.kCGWindowNumber] = true;
+  }
+  return ids;
+}
+
+// Terminal's scriptable windows, front-to-back, restricted to the current
+// Space and not minimized. Matched by id (exact).
+function currentSpaceWindows() {
+  const idMap = currentSpaceTerminalIds();
+  const wins = Application('Terminal').windows;
+  const n = wins.length;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const w = wins[i];
+    let id;
+    try { id = w.id(); } catch (e) { continue; }
+    if (!idMap[id]) continue;
+    if (w.miniaturized()) continue;
+    const b = w.bounds();
+    let title = '';
+    try { title = w.name(); } catch (e) {}
+    out.push({ win: w, id: id, bounds: b, title: title, center: { x: b.x + b.width / 2, y: b.y + b.height / 2 } });
+  }
+  return out; // front-to-back
+}
+
+function screenContaining(center, screens) {
+  for (let i = 0; i < screens.length; i++) {
+    const f = screens[i].frame;
+    if (center.x >= f.x && center.x < f.x + f.w && center.y >= f.y && center.y < f.y + f.h) return screens[i];
+  }
+  let best = screens[0], bd = Infinity;
+  for (let i = 0; i < screens.length; i++) {
+    const f = screens[i].frame;
+    const dx = (f.x + f.w / 2) - center.x, dy = (f.y + f.h / 2) - center.y;
+    const d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = screens[i]; }
+  }
+  return best;
+}
+
+// ===========================================================================
+// Layout. Near-square grid (wide-biased landscape, tall-biased portrait). The
+// partial final group stretches to fill: by default the last COLUMN stretches
+// vertically (one tall window beside a block of smaller ones), which suits a
+// terminal workflow; --horizontal stretches the last ROW instead.
+// ===========================================================================
+
+function gridFor(n, usable, o) {
+  let cols, rows;
+  if (o.cols && o.rows)      { cols = o.cols; rows = o.rows; }
+  else if (o.cols)           { cols = o.cols; rows = Math.ceil(n / cols); }
+  else if (o.rows)           { rows = o.rows; cols = Math.ceil(n / rows); }
+  else {
+    cols = Math.ceil(Math.sqrt(n));
+    rows = Math.ceil(n / cols);
+    if (usable.h > usable.w * 1.2) { const t = cols; cols = rows; rows = t; }
+  }
+  if (cols * rows < n) rows = Math.ceil(n / cols);
+  return { cols, rows };
+}
+
+function planRects(n, usable, o) {
+  const { cols, rows } = gridFor(n, usable, o);
+  const gap = o.gap, margin = o.margin;
+  const ax = usable.x + margin, ay = usable.y + margin;
+  const aw = usable.w - 2 * margin, ah = usable.h - 2 * margin;
+  const rects = [];
+
+  if (o.horizontal) {
+    // Row-major: each row holds up to `cols` windows; the partial last row
+    // stretches across the full width.
+    const rowH = (ah - gap * (rows - 1)) / rows;
+    let placed = 0;
+    for (let r = 0; r < rows && placed < n; r++) {
+      const k = Math.min(cols, n - placed);
+      const colW = (aw - gap * (k - 1)) / k;
+      const y = ay + r * (rowH + gap);
+      for (let c = 0; c < k; c++) {
+        rects.push({ x: Math.round(ax + c * (colW + gap)), y: Math.round(y), width: Math.round(colW), height: Math.round(rowH) });
+        placed++;
+      }
+    }
+  } else {
+    // Column-major (default): each column holds up to `rows` windows; the
+    // partial last column stretches to the full height — a tall window beside
+    // the grid.
+    const colW = (aw - gap * (cols - 1)) / cols;
+    let placed = 0;
+    for (let c = 0; c < cols && placed < n; c++) {
+      const k = Math.min(rows, n - placed);
+      const rowH = (ah - gap * (k - 1)) / k;
+      const x = ax + c * (colW + gap);
+      for (let r = 0; r < k; r++) {
+        rects.push({ x: Math.round(x), y: Math.round(ay + r * (rowH + gap)), width: Math.round(colW), height: Math.round(rowH) });
+        placed++;
+      }
+    }
+  }
+  return { cols, rows, rects, mode: o.horizontal ? 'horizontal' : 'vertical' };
+}
+
+// Order windows to match the rect fill order so assignment is stable: column-
+// major for vertical layouts, row-major for horizontal ones.
+function orderWindows(wins, mode) {
+  return wins.slice().sort((p, q) => {
+    if (mode === 'vertical') {
+      const dx = p.center.x - q.center.x;
+      if (Math.abs(dx) > 40) return dx;
+      return p.center.y - q.center.y;
+    }
+    const dy = p.center.y - q.center.y;
+    if (Math.abs(dy) > 40) return dy;
+    return p.center.x - q.center.x;
+  });
+}
+
+function applyBounds(win, rect, dry) {
+  if (!dry) { try { win.bounds = rect; } catch (e) {} }
+}
+
+// ===========================================================================
+// Shared helpers
+// ===========================================================================
+
+function parseCommon(rest) {
+  const o = { dryRun: false, gap: 0, margin: 0, cols: 0, rows: 0,
+              allDisplays: false, json: false, horizontal: false, reverse: false };
+  const pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    switch (a) {
+      case '-n': case '--dry-run':  o.dryRun = true; break;
+      case '--all-displays':        o.allDisplays = true; break;
+      case '--json':                o.json = true; break;
+      case '--horizontal':          o.horizontal = true; break;
+      case '--vertical':            o.horizontal = false; break;
+      case '--reverse':             o.reverse = true; break;
+      case '--gap':                 o.gap = parseInt(rest[++i], 10) || 0; break;
+      case '--margin':              o.margin = parseInt(rest[++i], 10) || 0; break;
+      case '--cols':                o.cols = parseInt(rest[++i], 10) || 0; break;
+      case '--rows':                o.rows = parseInt(rest[++i], 10) || 0; break;
+      case '--grid': {
+        const m = String(rest[++i] || '').match(/^(\d+)x(\d+)$/i);
+        if (m) { o.cols = parseInt(m[1], 10); o.rows = parseInt(m[2], 10); }
+        break;
+      }
+      default:
+        if (a[0] === '-') throw new Error('unknown option: ' + a);
+        pos.push(a);
+    }
+  }
+  return { o, pos };
+}
+
+// Apply `snap`-style positional layout: cols [N] | rows [N] | <CxR> | grid
+function applyLayoutPositional(o, pos) {
+  if (!pos.length) return;
+  const p = String(pos[0]).toLowerCase();
+  const grid = p.match(/^(\d+)x(\d+)$/);
+  if (grid)             { o.cols = parseInt(grid[1], 10); o.rows = parseInt(grid[2], 10); }
+  else if (p === 'cols'){ if (pos[1]) o.cols = parseInt(pos[1], 10) || 0; else o.rows = 1; }
+  else if (p === 'rows'){ if (pos[1]) o.rows = parseInt(pos[1], 10) || 0; else o.cols = 1; }
+  else if (p === 'grid'){ /* auto */ }
+  else throw new Error('unknown layout: ' + pos[0]);
+}
+
+function groupsForDisplays(wins, screens, o) {
+  const groups = [];
+  if (o.allDisplays) {
+    for (let s = 0; s < screens.length; s++) {
+      const g = wins.filter(w => screenContaining(w.center, screens) === screens[s]);
+      if (g.length) groups.push({ usable: Object.assign({ label: screens[s].index + 1 }, screens[s].usable), group: g });
+    }
+  } else {
+    const active = screenContaining(wins[0].center, screens);
+    const g = wins.filter(w => screenContaining(w.center, screens) === active);
+    groups.push({ usable: Object.assign({ label: active.index + 1 }, active.usable), group: g });
+  }
+  return groups;
+}
+
+function tileGroup(wins, usable, o, rotate, results) {
+  if (!wins.length) return;
+  const plan = planRects(wins.length, usable, o);
+  const ordered = orderWindows(wins, plan.mode);
+  const n = ordered.length;
+  const moves = [];
+  for (let i = 0; i < n; i++) {
+    const target = rotate ? (((i + rotate) % n) + n) % n : i;
+    const rect = plan.rects[target];
+    applyBounds(ordered[i].win, rect, o.dryRun);
+    moves.push({ id: ordered[i].id, from: ordered[i].bounds, to: rect });
+  }
+  results.push({ display: usable.label, grid: plan.cols + 'x' + plan.rows, mode: plan.mode, usable: usable, count: n, moves: moves });
+}
+
+function format(results, o, action) {
+  if (o.json) return JSON.stringify({ action: action, dryRun: o.dryRun, results: results }, null, 2);
+  const dryVerb = { snap: 'Would snap', max: 'Would maximize', cycle: 'Would cycle' };
+  const pastVerb = { snap: 'Snapped', max: 'Maximized', cycle: 'Cycled' };
+  const verb = o.dryRun ? dryVerb[action] : pastVerb[action];
+  const lines = results.filter(r => r.count > 0).map(r => {
+    const what = action === 'max'
+      ? `${r.count} window`
+      : `${r.count} window${r.count === 1 ? '' : 's'} → ${r.grid} ${r.mode} grid`;
+    return `${verb} ${what} on display ${r.display} ` +
+      `(usable ${r.usable.w}×${r.usable.h} @ ${r.usable.x},${r.usable.y})` +
+      ((o.gap || o.margin) ? `  gap=${o.gap} margin=${o.margin}` : '');
+  });
+  if (o.dryRun) {
+    for (let i = 0; i < results.length; i++) {
+      for (const m of results[i].moves) {
+        lines.push(`  win ${m.id}: ${Math.round(m.from.x)},${Math.round(m.from.y)} ${m.from.width}×${m.from.height}` +
+          `  →  ${m.to.x},${m.to.y} ${m.to.width}×${m.to.height}`);
+      }
+    }
+  }
+  return lines.join('\n') || 'lterminal: nothing to do on the active display.';
+}
+
+// ===========================================================================
+// Commands
+// ===========================================================================
+
+function cmdTile(rest, action) {
+  const { o, pos } = parseCommon(rest);
+  applyLayoutPositional(o, pos);
+  const wins = currentSpaceWindows();
+  if (!wins.length) return 'lterminal: no visible Terminal windows on the current Space.';
+  const screens = screensTopLeft();
+  const results = [];
+  const rotate = action === 'cycle' ? (o.reverse ? -1 : 1) : 0;
+  for (const gr of groupsForDisplays(wins, screens, o)) tileGroup(gr.group, gr.usable, o, rotate, results);
+  return format(results, o, action);
+}
+
+function cmdMax(rest) {
+  const { o } = parseCommon(rest);
+  const wins = currentSpaceWindows();
+  if (!wins.length) return 'lterminal: no visible Terminal windows on the current Space.';
+  const screens = screensTopLeft();
+  const front = wins[0];
+  const scr = screenContaining(front.center, screens);
+  const u = scr.usable;
+  const rect = {
+    x: Math.round(u.x + o.margin), y: Math.round(u.y + o.margin),
+    width: Math.round(u.w - 2 * o.margin), height: Math.round(u.h - 2 * o.margin),
+  };
+  applyBounds(front.win, rect, o.dryRun);
+  const results = [{
+    display: scr.index + 1, grid: 'max', mode: 'max',
+    usable: Object.assign({ label: scr.index + 1 }, u), count: 1,
+    moves: [{ id: front.id, from: front.bounds, to: rect }],
+  }];
+  return format(results, o, 'max');
+}
+
+function cmdList(rest) {
+  const { o } = parseCommon(rest);
+  const wins = currentSpaceWindows();
+  const screens = screensTopLeft();
+  const rows = wins.map((w, i) => ({
+    id: w.id, front: i === 0, display: screenContaining(w.center, screens).index + 1,
+    bounds: w.bounds, title: w.title,
+  }));
+  if (o.json) return JSON.stringify(rows, null, 2);
+  if (!rows.length) return 'No visible Terminal windows on the current Space.';
+  const lines = ['ID        DISP  BOUNDS                  TITLE'];
+  for (const r of rows) {
+    const b = r.bounds;
+    lines.push(
+      String(r.id).padEnd(9) + ' ' +
+      String(r.display).padEnd(5) + ' ' +
+      (b.x + ',' + b.y + ' ' + b.width + '×' + b.height).padEnd(23) + ' ' +
+      (r.front ? '★ ' : '') + (r.title || '')
+    );
+  }
+  return lines.join('\n');
+}
+
+// Snapshot current-Space windows as JSON (consumed by `lterminal save`).
+function cmdDump(rest) {
+  const wins = currentSpaceWindows();
+  return JSON.stringify(wins.map(w => ({ id: w.id, bounds: w.bounds, title: w.title })));
+}
+
+// Restore a saved arrangement (JSON passed as the first positional arg).
+function cmdApply(rest) {
+  const { o, pos } = parseCommon(rest);
+  if (!pos.length) return 'lterminal restore: no layout data.';
+  let saved;
+  try { saved = JSON.parse(pos[0]); } catch (e) { return 'lterminal restore: bad layout data: ' + e; }
+  const wins = currentSpaceWindows();
+  const byId = {};
+  wins.forEach(w => { byId[w.id] = w; });
+  let matched = 0, missing = 0;
+  const moves = [];
+  for (const s of saved) {
+    const w = byId[s.id];
+    if (!w) { missing++; continue; }
+    matched++;
+    const rect = { x: s.bounds.x, y: s.bounds.y, width: s.bounds.width, height: s.bounds.height };
+    applyBounds(w.win, rect, o.dryRun);
+    moves.push({ id: s.id, from: w.bounds, to: rect });
+  }
+  const verb = o.dryRun ? 'Would restore' : 'Restored';
+  let msg = `${verb} ${matched} window${matched === 1 ? '' : 's'}`;
+  if (missing) msg += ` (${missing} saved window${missing === 1 ? '' : 's'} no longer open — window ids reset when Terminal restarts)`;
+  if (o.dryRun) {
+    for (const m of moves) {
+      msg += `\n  win ${m.id}: ${Math.round(m.from.x)},${Math.round(m.from.y)} ${m.from.width}×${m.from.height}` +
+        `  →  ${m.to.x},${m.to.y} ${m.to.width}×${m.to.height}`;
+    }
+  }
+  return msg;
+}
+
+function run(argv) {
+  const args = argv || [];
+  const cmd = args[0] || 'help';
+  const rest = args.slice(1);
+  try {
+    switch (cmd) {
+      case 'snap':  return cmdTile(rest, 'snap');
+      case 'cycle': return cmdTile(rest, 'cycle');
+      case 'max':   return cmdMax(rest);
+      case 'list':  return cmdList(rest);
+      case 'dump':  return cmdDump(rest);
+      case 'apply': return cmdApply(rest);
+      default:      return 'lterminal: unknown engine command: ' + cmd;
+    }
+  } catch (e) {
+    if (String(e).indexOf('1743') !== -1) {
+      return 'lterminal: not authorized to control Terminal.\n' +
+             'Approve it in System Settings → Privacy & Security → Automation → Terminal.';
+    }
+    return 'lterminal ' + cmd + ': ' + e;
+  }
+}

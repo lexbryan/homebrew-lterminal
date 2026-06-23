@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# lterminal — snap/manage Terminal.app windows.
+# lterminal — tile & manage Terminal.app windows on the current macOS Space.
 #
 set -euo pipefail
 
-# Resolve this script's real directory, following symlinks (Homebrew/~/bin links here).
+# Resolve this script's real directory, following symlinks (Homebrew/~/bin link here).
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
@@ -13,34 +13,91 @@ while [ -h "$SOURCE" ]; do
 done
 DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 LIB="$(cd -P "$DIR/../lib" >/dev/null 2>&1 && pwd)"
+ENGINE="$LIB/engine.jxa"
+OSA=(/usr/bin/osascript -l JavaScript "$ENGINE")
+LAYOUT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lterminal/layouts"
 
 usage() {
   cat <<'EOF'
-lterminal — tile Terminal.app windows on the current macOS Space.
+lterminal — tile & manage Terminal.app windows on the current macOS Space.
 
 USAGE
-  lterminal snap [options]
+  lterminal <command> [options]
+
+COMMANDS
+  snap [layout]     Tile current-Space windows into an equal grid (default)
+                      layout:  grid (default) | cols [N] | rows [N] | <CxR>
+  max               Maximize the focused window to fill its display
+  cycle             Rotate windows through their grid slots (--reverse to flip)
+  list              List the current-Space Terminal windows
+  save <name>       Save the current window arrangement
+  restore <name>    Restore a saved arrangement
+  layouts           List saved arrangements
+  help              Show this help
 
 OPTIONS
-  -n, --dry-run       Show the planned layout without moving any window
-      --gap <px>      Gutter between windows (default 0)
-      --margin <px>   Outer margin around the grid (default 0)
-      --grid <CxR>    Force a grid, e.g. --grid 3x2
-      --cols <N>      Force the number of columns
-      --rows <N>      Force the number of rows
-      --all-displays  Tile each display's current-Space windows independently
+  -n, --dry-run       Show the plan without moving anything (all commands)
+      --horizontal    snap/cycle: stretch the leftover windows as a wide row
+                      (default: a tall vertical column beside the grid)
+      --vertical      snap/cycle: force the default vertical-column leftover
+      --gap <px>      snap/cycle: gutter between windows (default 0)
+      --margin <px>   snap/cycle/max: outer margin (default 0)
+      --grid <CxR>    snap/cycle: force a grid, e.g. --grid 3x2
+      --cols <N>      snap/cycle: force columns
+      --rows <N>      snap/cycle: force rows
+      --reverse       cycle: reverse direction
+      --all-displays  snap/cycle: tile each display independently
       --json          Machine-readable output
-  -h, --help          Show this help
 
-Snaps every Terminal window visible on the current Space + active display into
-an equal, near-square grid that fills the usable area (minus menu bar / Dock).
+Operates on the Terminal windows visible on your current Space + active display,
+filling the usable area (minus menu bar / Dock).
 EOF
 }
 
-cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+cmd="${1:-help}"
+if [ $# -gt 0 ]; then shift; fi
+
 case "$cmd" in
-  snap)               exec /usr/bin/osascript -l JavaScript "$LIB/snap.jxa" "$@" ;;
-  ""|-h|--help|help)  usage ;;
-  --version|-v)       echo "lterminal 0.1.0" ;;
-  *)                  echo "lterminal: unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 1 ;;
+  snap|cycle|max|list)
+    exec "${OSA[@]}" "$cmd" "$@" ;;
+
+  save)
+    name="${1:-}"
+    [ -n "$name" ] || { echo "usage: lterminal save <name>" >&2; exit 1; }
+    # Dump to a temp file and validate it's a JSON array BEFORE replacing the
+    # saved layout — the engine reports errors as plain text on exit 0, so a
+    # direct redirect could overwrite a good layout with an error message.
+    tmp="$(mktemp "${TMPDIR:-/tmp}/lterminal.XXXXXX")"
+    "${OSA[@]}" dump > "$tmp" || { echo "lterminal: save failed (engine error)" >&2; rm -f "$tmp"; exit 1; }
+    if ! /usr/bin/jq -e 'type == "array"' "$tmp" >/dev/null 2>&1; then
+      echo "lterminal: save failed:" >&2; cat "$tmp" >&2; rm -f "$tmp"; exit 1
+    fi
+    mkdir -p "$LAYOUT_DIR"
+    file="$LAYOUT_DIR/$name.json"
+    mv "$tmp" "$file"
+    count="$(/usr/bin/jq 'length' "$file")"
+    echo "Saved layout '$name' ($count windows) → $file" ;;
+
+  restore)
+    name="${1:-}"
+    [ -n "$name" ] || { echo "usage: lterminal restore <name> [--dry-run]" >&2; exit 1; }
+    shift || true
+    file="$LAYOUT_DIR/$name.json"
+    [ -f "$file" ] || { echo "lterminal: no saved layout '$name' (see: lterminal layouts)" >&2; exit 1; }
+    exec "${OSA[@]}" apply "$(cat "$file")" "$@" ;;
+
+  layouts)
+    if compgen -G "$LAYOUT_DIR/*.json" >/dev/null 2>&1; then
+      for f in "$LAYOUT_DIR"/*.json; do
+        n="$(basename "$f" .json)"
+        c="$(/usr/bin/jq 'length' "$f" 2>/dev/null || echo '?')"
+        printf '%s  (%s windows)\n' "$n" "$c"
+      done
+    else
+      echo "No saved layouts yet. Create one with: lterminal save <name>"
+    fi ;;
+
+  ""|-h|--help|help) usage ;;
+  --version|-v)      echo "lterminal 0.2.0" ;;
+  *) echo "lterminal: unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 1 ;;
 esac

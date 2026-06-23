@@ -22,9 +22,11 @@ third-party dependencies, nothing to compile:
 - **`NSScreen.visibleFrame`** — the usable rectangle, with menu bar and Dock
   already subtracted, per display.
 
-Windows are sorted row-major before placement, the grid is wide-biased on
-landscape displays and tall-biased on portrait ones, and a partial final row
-stretches to fill the width.
+The grid is wide-biased on landscape displays and tall-biased on portrait ones.
+When the window count doesn't fill the grid evenly, the leftover stretches into a
+full-height **vertical column** beside the block by default — a tall terminal
+next to a grid of shorter ones (e.g. 5 windows → a 2×2 block + one tall column).
+Pass `--horizontal` to stretch it as a wide bottom row instead.
 
 ## Install
 
@@ -45,17 +47,27 @@ run `brew trust lexbryan/lterminal` and re-run the install.
 ./install.sh /usr/local/bin # or a directory of your choice
 ```
 
-## Usage
+## Commands
 
 ```sh
-lterminal snap                 # tile the current Space + active display
-lterminal snap --dry-run       # show the plan, move nothing
-lterminal snap --gap 8         # 8px gutters between windows
-lterminal snap --margin 12     # 12px outer margin
-lterminal snap --grid 2x2      # force a specific grid
-lterminal snap --all-displays  # tile each display independently
-lterminal snap --json          # machine-readable output
+lterminal snap                 # tile current Space + active display (vertical-last)
+lterminal snap --horizontal    # leftover stretches as a wide bottom row instead
+lterminal snap cols            # full-height columns, side by side
+lterminal snap rows            # full-width rows, stacked
+lterminal snap 2x2             # force a grid (auto-expands if too small)
+lterminal max                  # maximize the focused window to its display
+lterminal cycle                # rotate windows through their slots (--reverse to flip)
+lterminal list                 # list the current-Space Terminal windows
+lterminal save work            # snapshot the current arrangement as "work"
+lterminal restore work         # put the windows back
+lterminal layouts              # list saved arrangements
 ```
+
+Common options: `--dry-run` (plan only), `--gap <px>`, `--margin <px>`,
+`--all-displays`, `--json`. Run `lterminal help` for the full list.
+
+> `save`/`restore` match windows by their Terminal window id, so a saved layout
+> restores within the same session; ids reset when Terminal restarts.
 
 ## Permissions
 
@@ -96,5 +108,6 @@ Replace `lexbryan` with your GitHub username if different.
 
 ## Roadmap
 
-`snap cols` / `snap rows` · `max` (focused window only) · `save`/`restore`
-named layouts · `cycle` (rotate windows through slots).
+Ideas not yet built: per-window pinning, gaps/margins persisted in a config
+file, and matching saved layouts by title/working-dir so they survive a Terminal
+restart.
