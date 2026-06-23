@@ -31,8 +31,12 @@ stretches to fill the width.
 **Homebrew (recommended):**
 
 ```sh
-brew install lexbryan/lterminal/lterminal
+brew tap lexbryan/lterminal
+brew install lterminal
 ```
+
+Newer Homebrew gates third-party taps behind a one-time approval — if it asks,
+run `brew trust lexbryan/lterminal` and re-run the install.
 
 **Without Homebrew:**
 
