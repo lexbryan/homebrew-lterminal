@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# lterminal — snap/manage Terminal.app windows.
+#
+set -euo pipefail
+
+# Resolve this script's real directory, following symlinks (Homebrew/~/bin links here).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+LIB="$(cd -P "$DIR/../lib" >/dev/null 2>&1 && pwd)"
+
+usage() {
+  cat <<'EOF'
+lterminal — tile Terminal.app windows on the current macOS Space.
+
+USAGE
+  lterminal snap [options]
+
+OPTIONS
+  -n, --dry-run       Show the planned layout without moving any window
+      --gap <px>      Gutter between windows (default 0)
+      --margin <px>   Outer margin around the grid (default 0)
+      --grid <CxR>    Force a grid, e.g. --grid 3x2
+      --cols <N>      Force the number of columns
+      --rows <N>      Force the number of rows
+      --all-displays  Tile each display's current-Space windows independently
+      --json          Machine-readable output
+  -h, --help          Show this help
+
+Snaps every Terminal window visible on the current Space + active display into
+an equal, near-square grid that fills the usable area (minus menu bar / Dock).
+EOF
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+case "$cmd" in
+  snap)               exec /usr/bin/osascript -l JavaScript "$LIB/snap.jxa" "$@" ;;
+  ""|-h|--help|help)  usage ;;
+  --version|-v)       echo "lterminal 0.1.0" ;;
+  *)                  echo "lterminal: unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 1 ;;
+esac
