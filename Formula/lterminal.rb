@@ -2,9 +2,9 @@ class Lterminal < Formula
   desc "Tile Terminal.app windows on the current macOS Space into an equal grid"
   homepage "https://github.com/lexbryan/homebrew-lterminal"
   # For a tagged release, fill in the checksum:
-  #   curl -L https://github.com/lexbryan/homebrew-lterminal/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
-  url "https://github.com/lexbryan/homebrew-lterminal/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "bd0f0488d3db8f655ee276c6ac5ace63038744d081f70cca6910d58203260487"
+  #   curl -L https://github.com/lexbryan/homebrew-lterminal/archive/refs/tags/v0.2.0.tar.gz | shasum -a 256
+  url "https://github.com/lexbryan/homebrew-lterminal/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "5cecf0140803f3931ce9da049f3d56795ce59b53beaa051db10d3b79a6a5fd5e"
   license "MIT"
 
   # Install straight from main, no release required:
